@@ -6,3 +6,9 @@ data/
 backups/
 *.log
 *.xel
+
+# Segredos e dados locais — nunca versionar
+.env
+.env.local
+.env.*.local
+
