@@ -1,0 +1,8 @@
+*.mdf
+*.ldf
+*.bak
+*.ndf
+data/
+backups/
+*.log
+*.xel
