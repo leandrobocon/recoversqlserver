@@ -4,9 +4,6 @@ Repositório para planejamento e execução da recuperação de bases **SQL Serv
 
 > Status: planejamento/em construção — recuperação da base `db_acervo` (corrompida).
 
-## Base em recuperação (primeira)
-- **`db_acervo`** — `db_acervo.mdf` (~2.7 GB) + `db_acervo_log.ldf` (~214 MB), em `/var/tmp`
-- (fase posterior) `FACEAR_ICO` — `FACEAR_ICO.mdf` (~105 GB)
 
 ## Abordagem
 1. **DBCC CHECKDB** via imagem oficial `mcr.microsoft.com/mssql/server` em **Docker** (gratuita).
