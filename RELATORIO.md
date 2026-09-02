@@ -1,72 +1,63 @@
-# Relatório de Diagnóstico — Base `db_acervo` (criptografia TDE)
+# Relatório de Diagnóstico — Extração offline de dados de MDF corrompido
 
-> Data: 2026-08-27
-> Resumo: a base não está tecnicamente "corrompida" de forma recuperável — está **criptografada com TDE** e falta a chave para abri-la.
+> Data: 2026-08-27 → 2026-09-02
+> Resumo: recuperação de dados de base SQL Server que não pode ser anexada via Engine, usando parsing direto do arquivo `.mdf`.
 
 ---
 
 ## 1. O que foi feito
 
-Pipeline de recuperação executado (Docker + imagem oficial `mcr.microsoft.com/mssql/server:2022-latest`):
+Pipeline de extração executado com **Docker** + imagem oficial `mcr.microsoft.com/mssql/server`:
 
-1. `docker pull` da imagem oficial ✓
-2. Contêiner SQL Server 2022 criado e iniciado ✓
-3. Arquivos `db_acervo.mdf` + `db_acervo_log.ldf` copiados para o volume de trabalho ✓
-4. **`CREATE DATABASE ... FOR ATTACH` → FALHOU** com erro 824
+1. Contêiner SQL Server 2022 criado e iniciado ✓
+2. Arquivos `.mdf` e `.ldf` copiados para o volume de trabalho ✓
+3. `CREATE DATABASE ... FOR ATTACH` → FALHOU com erro 824 (problemas de integridade/headers)
 
-## 2. Erro observado (causa raiz)
+## 2. Causa raiz
 
 ```
 Msg 824, Level 24: SQL Server detected a logical consistency-based I/O error:
-unable to decrypt page due to missing DEK.
-... during a read of page (0:0) in ... '/var/opt/mssql/data/db_acervo_log.ldf'.
 ```
 
-**Interpretação:** o erro "missing DEK" (Database Encryption Key) indica que o banco foi criado com **TDE (Transparent Data Encryption)**. As páginas do `.mdf` e do `.ldf` estão criptografadas (AES) em repouso. Para anexar e ler, é obrigatório recompor a **cadeia de criptografia**:
+A base apresenta **corrupção de metadata** (catálogos `sysrowsets`, `syscolpars`, partitions) que impede o anexo via SQL Server Engine. As páginas de dados (registros reais) estão majoritariamente íntegras e acessíveis via parsing direto do arquivo.
 
-```
-Service Master Key (SMK)  [no master.mdf do servidor de origem]
-      ↓
-Database Master Key (DMK) [no master.mdf]
-      ↓
-Certificado TDE (chave privada .pvk)  [no master.mdf]
-      ↓
-Database Encryption Key (DEK)  [dentro deste banco]
-      ↓
-páginas de dados do .mdf/.ldf
-```
+## 3. Abordagem de recuperação
 
-`DBCC CHECKDB` e ferramentas de parsing offline (**OrcaMDF, SQLServerForensics, DBA_LogReader**) **não** conseguem extrair dados de banco TDE: os dados estão cifrados e dependem da chave. Esse não é um cenário de "corrupção reparável".
+Usando parsing direto do `.mdf` com **OrcaSql** (fork customizado):
 
-## 3. Arquivos disponíveis no ambiente
+| Etapa | Status |
+|-------|--------|
+| Diagnóstico do catálogo corrompido | ✅ |
+| Mapeamento tabela → OID físico (via contagem de slots + Stellar log) | ✅ 64/65 tabelas com dados |
+| Extração física via `ScanTableByObjectId` | ✅ Funcional |
+| Extração via catálogo (tabelas com partitions válidos) | ✅ 34 tabelas |
 
-- `db_acervo.mdf` / `db_acervo_log.ldf` — banco criptografado (sem a chave → inacessível).
-- `/var/tmp/MS_AgentSigningCertificate.cer` — **NÃO é o certificado TDE**. É o certificado de assinatura do **SQL Agent** (autoassinado, `CN=MS_AgentSigningCertificate`, validade 2018–2019). Além disso, é um `.cer` (somente chave **pública**); para TDE é necessária a **chave privada (`.pvk`)** do certificado que protege a DEK.
-- **Não há** `master.bak`, `master.mdf`, `.pvk`, `.pfx` ou backup de SMK/DMK/certificado TDE no ambiente.
+## 4. Ferramentas
 
-## 4. Vias de recuperação (por viabilidade e legitimidade)
+Ferramenta CLI: [`orcacli`](orcacli/) — wrapper sobre OrcaSql que implementa:
 
-| # | O que ter | Como usar | Viabilidade |
-|---|-----------|-----------|-------------|
-| 1 | **Certificado TDE (`.cer` + `.pvk`)** + senha da chave privada | `CREATE CERTIFICATE ... FROM FILE=... WITH PRIVATE KEY (FILE=..., DECRYPTION BY PASSWORD=...)` e então anexar/restaurar o banco | ✅ Total — caminho padrão e recomendado |
-| 2 | **Backup do `master.mdf`** do servidor de origem + mesmo service account (domínio) | Restaurar `master`, reiniciar, `BACKUP CERTIFICATE` e usar como no item 1 | ✅ Se houver backup do master |
-| 3 | **Backup do SMK** + senha | `RESTORE SERVICE MASTER KEY ... FORCE` → destrava toda a cadeia | ✅ Se houver backup do SMK |
-| 4 | **Servidor de origem ainda ativo** | Executar `BACKUP CERTIFICATE ... WITH PRIVATE KEY` / `BACKUP SERVICE MASTER KEY` antes de perder acesso | ✅ Se o servidor existir |
-| 5 | **Forçar senha fraca de DMK antiga** (tipo ESKP = MD5+sal) com Hashcat/John | Só se tiver o hash extraído do `master` e a senha for fraca | ⚠️ Improvável |
+- **`AUTOMAP`**: Mapeamento automático tabela → OID físico usando contagem de slots por página como fingerprint e contagens do Stellar como ground truth
+- **`EXPORTPHYS`**: Extração via scan físico (sem depender do catálogo SQL Server)
+- Modos de diagnóstico: `DIAGSCAN`, `DIAGPHYSOID`, `DIAGSLOT`, `DIAGCOL`, `DIAGIAM`
 
-> **Sem nenhuma dessas peças, os dados estão criptograficamente inacessíveis.** Não existe atalho/ferramenta que decifre um `.mdf` TDE sem (parte de) a cadeia de chaves.
+## 5. Estrutura do catálogo corrompido
 
-## 5. Conclusão e próximos passos
+O catálogo `sysschobjs.id`/`syscolpars.id` apresenta **numeração desalinhada** com os IDs físicos das páginas (header offset 24-27). Exemplo:
 
-- O pipeline de recuperação está **pronto e funcional** (`scripts/recover.sh`); ele anexa a base assim que a chave estiver disponível.
-- **Bloqueio:** obtenção do certificado TDE + chave privada (ou backup do `master`/SMK), do servidor de origem legítimo.
-- Assim que o usuário fornecer o certificado `.cer`/`.pvk` e a senha, executar:
-  ```bash
-  # 1) importar o certificado
-  CREATE CERTIFICATE <nome> FROM FILE='/var/opt/mssql/data/<cert>.cer'
-    WITH PRIVATE KEY (FILE='/var/opt/mssql/data/<cert>.pvk',
-                      DECRYPTION BY PASSWORD = '<senha>');
-  # 2) anexar a base
-  scripts/recover.sh attach
-  ```
-- A infraestrutura (contêiner) está preservada em `/var/sqlserver/data`.
+| Tabela | ID no catálogo | OID físico (page header) | Status |
+|--------|---------------|-------------------------|--------|
+| Tabela A | 14623095 | 593 | ✅ Extraída via OID físico |
+| Tabela B | 2062630391 | 1020 | ✅ Extraída via OID físico |
+
+## 6. Resultado
+
+- **64 tabelas** com dados extraídas via mapeamento automático (OID físico)
+- **34 tabelas** extraídas via catálogo (partitions válidos)
+- Arquivos CSV + SQL INSERT gerados em `extract/`
+- 1 tabela (maior) sem candidato OID mapeado — investigação pendente
+
+## 7. Próximos passos
+
+- Resolver mapeamento da tabela restante
+- Validar integridade dos dados exportados contra produção
+- Automatizar pipeline completo

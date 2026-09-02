@@ -1,14 +1,38 @@
+# Database files — nunca versionar
 *.mdf
 *.ldf
 *.bak
 *.ndf
+
+# Volumes Docker / dados de trabalho
 data/
 backups/
+extract/
+
+# .NET build artifacts
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# IDE / Editor
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+
+# Logs
 *.log
 *.xel
 
-# Segredos e dados locais — nunca versionar
+# Segredos e dados locais
 .env
 .env.local
 .env.*.local
 
+# NuGet
+*.nupkg
+**/packages/
