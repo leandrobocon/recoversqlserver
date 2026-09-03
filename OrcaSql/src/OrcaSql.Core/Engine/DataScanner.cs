@@ -223,23 +223,21 @@ namespace OrcaSql.Core.Engine
 		/// </summary>
 		public Dictionary<int, (long slots, int pages)> SlotCountsByObjectId()
 		{
+			var cache = BuildPageCache();
 			var fs = Database.Files.First().Value;
-			var totalBytes = fs.Length;
 			var pageBytes = new byte[8192];
 			var res = new Dictionary<int, (long, int)>();
-			for (int pageId = 0; pageId < totalBytes / 8192; pageId++)
+			foreach (var kv in cache)
 			{
-				fs.Position = pageId * 8192L;
-				if (fs.Read(pageBytes, 0, 8192) < 8192)
-					break;
-				if (pageBytes[0] != 1) continue;
-				var type = pageBytes[1]; var level = pageBytes[3];
-				if ((type != 1 && type != 2) || level != 0) continue;
-				int oid = BitConverter.ToInt32(pageBytes, 24);
-				int slotCnt = BitConverter.ToInt16(pageBytes, 22);
-				if (oid <= 0 || slotCnt <= 0) continue;
-				if (!res.ContainsKey(oid)) res[oid] = (0, 0);
-				res[oid] = (res[oid].Item1 + slotCnt, res[oid].Item2 + 1);
+				long slots = 0;
+				foreach (var pageId in kv.Value)
+				{
+					fs.Position = pageId * 8192L;
+					if (fs.Read(pageBytes, 0, 8192) < 8192) continue;
+					int slotCnt = BitConverter.ToInt16(pageBytes, 22);
+					if (slotCnt > 0) slots += slotCnt;
+				}
+				res[kv.Key] = (slots, kv.Value.Count);
 			}
 			return res;
 		}
@@ -317,30 +315,14 @@ namespace OrcaSql.Core.Engine
 			var schemaWrapper = new DataExtractorHelper(schema);
 			var compression = new CompressionContext(CompressionLevel.None, false);
 
-			// O arquivo fisico (fileID 1 = MDF, 2 = LDF). Usamos page pointers no fileID 1.
+			var pageIds = GetPageIdsForObjectId(objectId);
 			var fs = Database.Files.First().Value;
-			var totalBytes = fs.Length;
 			var pageBytes = new byte[8192];
 
-			for (int pageId = 0; pageId < totalBytes / 8192; pageId++)
+			foreach (var pageId in pageIds)
 			{
 				fs.Position = pageId * 8192L;
 				if (fs.Read(pageBytes, 0, 8192) < 8192)
-					break;
-
-				// HeaderVersion invalida: pagina corrompida/nao-mdf
-				if (pageBytes[0] != 1)
-					continue;
-
-				var type = pageBytes[1];
-				var level = pageBytes[3];
-
-				// Somente paginas de dados de folha (Data/Index level 0)
-				if ((type != 1 && type != 2) || level != 0)
-					continue;
-
-				int pageObjectId = BitConverter.ToInt32(pageBytes, 24);
-				if (pageObjectId != objectId)
 					continue;
 
 				var parsedRows = new List<Row>();
@@ -358,6 +340,35 @@ namespace OrcaSql.Core.Engine
 				foreach (var row in parsedRows)
 					yield return row;
 			}
+		}
+
+		private Dictionary<int, List<long>> _pageCache;
+		private Dictionary<int, List<long>> BuildPageCache()
+		{
+			if (_pageCache != null) return _pageCache;
+			_pageCache = new Dictionary<int, List<long>>();
+			var fs = Database.Files.First().Value;
+			var totalBytes = fs.Length;
+			var pageBytes = new byte[8192];
+			for (int pageId = 0; pageId < totalBytes / 8192; pageId++)
+			{
+				fs.Position = pageId * 8192L;
+				if (fs.Read(pageBytes, 0, 8192) < 8192) break;
+				if (pageBytes[0] != 1) continue;
+				var type = pageBytes[1]; var level = pageBytes[3];
+				if ((type != 1 && type != 2) || level != 0) continue;
+				int oid = BitConverter.ToInt32(pageBytes, 24);
+				if (oid <= 0) continue;
+				if (!_pageCache.ContainsKey(oid)) _pageCache[oid] = new List<long>();
+				_pageCache[oid].Add(pageId);
+			}
+			return _pageCache;
+		}
+
+		private List<long> GetPageIdsForObjectId(int objectId)
+		{
+			var cache = BuildPageCache();
+			return cache.ContainsKey(objectId) ? cache[objectId] : new List<long>();
 		}
 		/// <summary>
 		/// Escaneia fisicamente todas as paginas de dados do arquivo (fileID 1) associadas ao objectID, sem depender do

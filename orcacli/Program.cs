@@ -155,7 +155,7 @@ class Program
             }
             var tbl6 = tables.First(t => t.Name == args[2]);
             long expect6 = 0;
-            var logPath6 = Environment.GetEnvironmentVariable("STELLAR_LOG") ?? Path.ChangeExtension(args[1] ?? "", ".log");
+            var logPath6 = Environment.GetEnvironmentVariable("STELLAR_LOG") ?? (args[1] ?? "") + ".log";
             foreach (var line in File.ReadAllLines(logPath6, Encoding.Unicode))
             {
                 var m6 = System.Text.RegularExpressions.Regex.Match(line, @"^dbo\.(\w+)\s*:\s*(\d+)\s*Records");
@@ -179,7 +179,7 @@ class Program
             Console.WriteLine($"Candidatos a mapear: {candidates.Count} tabelas");
 
             var stellar = new Dictionary<string, long>();
-            var logPath = Environment.GetEnvironmentVariable("STELLAR_LOG") ?? Path.ChangeExtension(args[1] ?? "", ".log");
+            var logPath = Environment.GetEnvironmentVariable("STELLAR_LOG") ?? (args[1] ?? "") + ".log";
             if (File.Exists(logPath))
             {
                 foreach (var line in File.ReadAllLines(logPath, Encoding.Unicode))
@@ -221,19 +221,18 @@ class Program
                 if (onlyTable != null && !string.Equals(t.Name, onlyTable, StringComparison.OrdinalIgnoreCase))
                     continue;
                 int oid = mapa.ContainsKey(t.Name) ? mapa[t.Name] : 0;
+                if (oid == 0)
+                {
+                    Console.Write($"\n[{t.Name}] (cat {t.ObjectID}, oid 0) ... ");
+                    Console.WriteLine("sem mapeamento - pulando");
+                    summaryP.AppendLine($"{t.Name}\t0\tSEM_MAPA");
+                    continue;
+                }
                 Console.Write($"\n[{t.Name}] (cat {t.ObjectID}, oid físico {oid}) ... ");
                 try
                 {
                     List<Row> rows;
-                    if (oid > 0)
-                    {
-                        rows = scanner.ScanTableByObjectId(t.Name, oid, false).ToList();
-                    }
-                    else
-                    {
-                        try { rows = scanner.ScanTable(t.Name, t.SchemaID, false).ToList(); }
-                        catch { rows = new List<Row>(); }
-                    }
+                    rows = scanner.ScanTableByObjectId(t.Name, oid, false).ToList();
                     var cols = rows.Count > 0 ? rows[0].Columns : GetSchemaCols(scanner, t);
                     var safeName = Sanitize(t.Name);
                     ExportCsv(Path.Combine(outDir, safeName + ".csv"), rows, cols);
